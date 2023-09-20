@@ -67,8 +67,8 @@ func MakeTrafficController(ifaceName string) {
 		}
 	}()
 	// cilium/ebpf 转换过后的 对象
-	objs := &dockertcxdpObjects{}
-	err = loadDockertcxdpObjects(objs, nil)
+	objs := &dockertcObjects{}
+	err = loadDockertcObjects(objs, nil)
 	if err != nil {
 		log.Fatalln("loadDockertcxdpObjects err: ", err)
 	}
@@ -76,7 +76,7 @@ func MakeTrafficController(ifaceName string) {
 	//  创建出 eBPF分类器
 	filter := &netlink.BpfFilter{
 		FilterAttrs:  filterattrs,
-		Fd:           objs.Mytc.FD(),
+		Fd:           objs.FirstTcExample.FD(),
 		Name:         "mytc",
 		DirectAction: true,
 	}
