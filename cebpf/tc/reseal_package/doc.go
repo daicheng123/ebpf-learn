@@ -1,4 +1,4 @@
-package docker
+package reseal_package
 
 //_go:generate bpf2go  -cc $BPF_CLANG -cflags $BPF_CFLAGS -target amd64 dockerxdp dockerxdp.bpf.c -- -I $BPF_HEADERS
 

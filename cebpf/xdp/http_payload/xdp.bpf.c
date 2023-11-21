@@ -23,6 +23,15 @@ struct bpf_map_def SEC("maps") allow_ips_map = {
      .max_entries = 1024,
  };
 
+static inline bool check_syn_and_fin(struct tcphdr *tcp) {
+    if (tcp -> sync) {
+        return true;
+    } else if (tcp -> fin) {
+        return true;
+    }
+    return false;
+ }
+
 SEC("xdp")
 int my_pass(struct xdp_md* ctx) {
     void *data = (void*)(long)ctx->data;
@@ -50,6 +59,10 @@ int my_pass(struct xdp_md* ctx) {
             return XDP_PASS;
     }
 
+    if (check_syn_and_fin(tcp)) {
+        return XDP_PASS;
+    }
+
     /*
         IP的总长度 - IP的头部长度 - TCP的头部长度 = TCP的data长度
         ip ->ihl(Internet Header Length) 以32位为一个单位，因此最终要乘以4才能得到完整的字节数
@@ -60,20 +73,33 @@ int my_pass(struct xdp_md* ctx) {
         return XDP_PASS;
     }
 
+    //获取tcp报文数据
     char *payload = (char *)(data + sizeof(*eth) + ip ->ihl * 4 + tcp -> doff * 4);
     if (tcp_data_len > HTTP_PAYLOAD_MAX) {
         tcp_data_len = HTTP_PAYLOAD_MAX;
     }
+
     struct ip_data *ipdata = NULL;
     ipdata = bpf_ringbuf_reserve(&ip_map, sizeof(*ipdata), 0);
     if (!ipdata) {
         return XDP_PASS;
     }
+    /*
+        bpf_probe_read_kernel
+        由于内核地址空间的保护机制等安全限制，程序无法直接访问内核空间的数据。
+        因此如果需要从内核空间读取数据到eBPF程序中，就需要使用bpf_probe_read_kernel()函数
+    */
     bpf_probe_read_kernel(ipdata -> payload, tcp_data_len, payload);
 
-    ipdata -> source_ip = bpf_ntohl(ip -> saddr); //bpf_ntohl 网络字节序转换成主机字节序 32位情况下(涉及到大小端)
+    /*
+        bpf_ntohl 网络字节序转换成主机字节序 32位情况下(涉及到大小端)
+    */
+    ipdata -> source_ip = bpf_ntohl(ip -> saddr);
     ipdata -> dest_ip = bpf_ntohl(ip -> daddr);
-    ipdata -> source_port = bpf_ntohs(tcp -> source);  //bpf_ntohs 网络字节序转换成主机字节序 16位情况下(涉及到大小端)
+     /*
+        bpf_ntohs 网络字节序转换成主机字节序 16位情况下(涉及到大小端)
+     */
+    ipdata -> source_port = bpf_ntohs(tcp -> source);
     ipdata -> dest_port = bpf_ntohs(tcp -> dest);
 
     bpf_ringbuf_submit(ipdata, 0);

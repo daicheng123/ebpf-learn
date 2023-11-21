@@ -1,13 +1,18 @@
-package preload_with_golang
+package tcp_package_prase
 
 import (
+	"errors"
 	"fmt"
+	"github.com/cilium/ebpf/perf"
+	"github.com/cilium/ebpf/ringbuf"
+	"github.com/daicheng123/ebpf-learn/pkg/nets"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
+	"unsafe"
 )
 
 const (
@@ -31,7 +36,7 @@ MakeTrafficController 加载tc ebpf 程序
 3、创建分类class(用于设定带宽级别)--->
 4、创建filter，把流量进行分类，并将包分发到前面定义的class中
 */
-func MakeTrafficController(ifaceName string) {
+func MakeTrafficController(ifaceName string) (err error) {
 	// 1、选择网络设备
 	iface, err := netlink.LinkByName(ifaceName)
 	if err != nil {
@@ -59,42 +64,84 @@ func MakeTrafficController(ifaceName string) {
 	}
 	//好比执行了 tc qdisc add dev docker0  clsact
 	if err := netlink.QdiscAdd(qdisc); err != nil {
-		log.Fatalln("QdiscAdd err: ", err)
+		return fmt.Errorf("QdiscAdd err: ", err)
 	}
 	defer func() {
 		if err := netlink.QdiscDel(qdisc); err != nil {
-			fmt.Println("QdiscDel err: ", err.Error())
+			log.Fatalf("QdiscDel err: ", err.Error())
 		}
 	}()
 	// cilium/ebpf 转换过后的 对象
 	objs := &dockertcObjects{}
 	err = loadDockertcObjects(objs, nil)
 	if err != nil {
-		log.Fatalln("loadDockertcxdpObjects err: ", err)
+		return fmt.Errorf("loadDockertcxdpObjects err: ", err)
 	}
 
 	//  创建出 eBPF分类器
 	filter := &netlink.BpfFilter{
 		FilterAttrs:  filterattrs,
-		Fd:           objs.FirstTcExample.FD(),
-		Name:         "first_tc_example",
+		Fd:           objs.TcpPackageExample.FD(),
+		Name:         "tcp_package_example",
 		DirectAction: true,
 	}
 
 	// 好比执行了 tc filter add dev docker0 ingress bpf direct-action obj dockertcxdp_bpfel_x86.o
 	if err := netlink.FilterAdd(filter); err != nil {
-		log.Fatalln("FilterAdd err: ", err)
+		return fmt.Errorf("FilterAdd err: ", err)
 	}
 
 	defer func() {
 		err = netlink.FilterDel(filter)
 		if err != nil {
-			fmt.Println("FilterDel err : ", err.Error())
+			log.Fatalf("FilterDel err : ", err.Error())
 		}
 	}()
+
+	go func() {
+		rd, err := ringbuf.NewReader(objs.TrafficControllerMap)
+		if err != nil {
+			return
+		}
+
+		defer rd.Close()
+		for {
+			record, err := rd.Read()
+			if err != nil {
+				if errors.Is(err, perf.ErrClosed) {
+					log.Println("Received signal, exiting..")
+					return
+				}
+				log.Printf("reading from reader: %s", err)
+				continue
+			}
+
+			if len(record.RawSample) > 0 {
+				data := (*TcData)(unsafe.Pointer(&record.RawSample[0]))
+				// 转换为网络字节序
+				ipAddr1 := nets.ResolveIP(data.SourceIP, true)
+				ipAddr2 := nets.ResolveIP(data.DestIP, true)
+				fmt.Printf("来源IP:%s,来源端口:%d,目标IP:%s,目标端口:%d\n",
+					ipAddr1.To4().String(),
+					data.SourcePort,
+					ipAddr2.To4().String(),
+					data.DestPort,
+				)
+			}
+		}
+	}()
+
 	fmt.Println("开始TC监听")
 	signalChan := make(chan os.Signal, 0)
 	signal.Notify(signalChan, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	<-signalChan
 	fmt.Println("结束TC监听")
+	return nil
+}
+
+type TcData struct {
+	SourceIP   uint32
+	DestIP     uint32
+	SourcePort uint16
+	DestPort   uint16
 }
